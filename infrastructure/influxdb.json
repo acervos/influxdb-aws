@@ -1,0 +1,300 @@
+{
+  "Description": "A template for spinning up and InfluxDB server",
+  "Parameters": {
+    "ImageId": {
+      "Description": "The AMI to use for this component",
+      "Type": "String",
+      "Default": "ami-bff32ccc"
+    },
+    "InstanceType": {
+      "Description": "The size of the EC2 instances",
+      "Default": "c4.large",
+      "Type": "String"
+    },
+    "VpcId": {
+      "Description": "The Id of the VPC to attach the environment to",
+      "Type": "AWS::EC2::VPC::Id",
+      "Default": "vpc-"
+    },
+    "KeyName": {
+      "Description": "Name of existing EC2 keypair to enable SSH access to the created instances",
+      "Type": "AWS::EC2::KeyPair::KeyName"
+    },
+    "PublicSubnets": {
+      "Type": "List<AWS::EC2::Subnet::Id>",
+      "Default": "subnet-"
+    },
+    "ConfigURL": {
+      "Description": "The URL for the influxdb.conf file",
+      "Type": "String"
+    }
+  },
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "LoadBalancerSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "ToPort": "80",
+            "IpProtocol": "tcp",
+            "FromPort": "80",
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "ToPort": "8086",
+            "IpProtocol": "tcp",
+            "FromPort": "8086",
+            "CidrIp": "0.0.0.0/0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "VpcId"
+        },
+        "GroupDescription": "An ELB group allowing access only to from the corresponding component"
+      }
+    },
+    "ComponentElasticLoadBalancer": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties": {
+        "Subnets": {
+          "Ref": "PublicSubnets"
+        },
+        "Listeners": [
+          {
+            "InstancePort": "8083",
+            "Protocol": "tcp",
+            "InstanceProtocol": "tcp",
+            "LoadBalancerPort": "80"
+          },
+          {
+            "InstancePort": "8086",
+            "Protocol": "tcp",
+            "InstanceProtocol": "tcp",
+            "LoadBalancerPort": "8086"
+          }
+        ],
+        "CrossZone": true,
+        "SecurityGroups": [
+          {
+            "Ref": "LoadBalancerSecurityGroup"
+          }
+        ],
+        "HealthCheck": {
+          "HealthyThreshold": 4,
+          "Interval": 10,
+          "Timeout": 5,
+          "UnhealthyThreshold": 2,
+          "Target": "HTTP:8083/"
+        }
+      }
+    },
+    "ComponentSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "ToPort": "8083",
+            "IpProtocol": "tcp",
+            "FromPort": "8083",
+            "SourceSecurityGroupId": {
+              "Ref": "LoadBalancerSecurityGroup"
+            }
+          },
+          {
+            "ToPort": "8086",
+            "IpProtocol": "tcp",
+            "FromPort": "8086",
+            "SourceSecurityGroupId": {
+              "Ref": "LoadBalancerSecurityGroup"
+            }
+          },
+          {
+            "ToPort": "22",
+            "IpProtocol": "tcp",
+            "FromPort": "22",
+            "CidrIp": "0.0.0.0/0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "VpcId"
+        },
+        "GroupDescription": "A component security group allowing access only from the corresponding ELB"
+      }
+    },
+    "ComponentLaunchConfiguration": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": {
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "IamInstanceProfile": {
+          "Ref": "ComponentInstanceProfile"
+        },
+        "ImageId": {
+          "Ref": "ImageId"
+        },
+        "SecurityGroups": [
+          {
+            "Ref": "ComponentSecurityGroup"
+          }
+        ],
+        "InstanceType": {
+          "Ref": "InstanceType"
+        },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/xvda",
+            "Ebs": {
+              "VolumeSize": "100",
+              "VolumeType": "io1",
+              "Iops": 1500
+            }
+          },
+          {
+            "DeviceName": "/dev/sdb",
+            "Ebs": {
+              "VolumeSize": "50",
+              "VolumeType": "io1",
+              "Iops": 1500
+            }
+          }
+        ],
+        "EbsOptimized": true,
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#cloud-config",
+                "\n",
+                "runcmd:\n",
+                "- yum update -y\n",
+                "- yum install -y wget\n",
+                "- wget https://s3.amazonaws.com/influxdb/influxdb-0.9.6.1-1.x86_64.rpm\n",
+                "- yum localinstall -y influxdb-0.9.6.1-1.x86_64.rpm\n",
+                "- mkfs -t ext4 /dev/xvdb\n",
+                "- mkdir /influx\n",
+                "- mkdir /db\n",
+                "- mount /dev/xvdb /db\n",
+                "- chown influxdb:influxdb /influx\n",
+                "- chown influxdb:influxdb /db\n",
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "- wget ",
+                      {
+                        "Ref": "ConfigURL"
+                      },
+                      " -O /etc/influxdb/influxdb.conf\n"
+                    ]
+                  ]
+                },
+                "- service influxdb start\n"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "ComponentAutoScalingGroup": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "UpdatePolicy": {
+        "AutoScalingRollingUpdate": {
+          "PauseTime": "PT0S",
+          "MaxBatchSize": 1,
+          "MinInstancesInService": 1
+        }
+      },
+      "Properties": {
+        "LoadBalancerNames": [
+          {
+            "Ref": "ComponentElasticLoadBalancer"
+          }
+        ],
+        "MinSize": 1,
+        "MaxSize": 2,
+        "LaunchConfigurationName": {
+          "Ref": "ComponentLaunchConfiguration"
+        },
+        "AvailabilityZones": {
+          "Fn::GetAZs": ""
+        },
+        "Tags": [
+          {
+            "PropagateAtLaunch": true,
+            "Value": "influxdb",
+            "Key": "Name"
+          }
+        ]
+      }
+    },
+    "ComponentScalingPolicy": {
+      "Type": "AWS::AutoScaling::ScalingPolicy",
+      "Properties": {
+        "ScalingAdjustment": 1,
+        "AutoScalingGroupName": {
+          "Ref": "ComponentAutoScalingGroup"
+        },
+        "AdjustmentType": "ChangeInCapacity"
+      }
+    },
+    "ComponentInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [
+          {
+            "Ref": "ComponentRole"
+          }
+        ]
+      }
+    },
+    "ComponentRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "Path": "/",
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "sts:AssumeRole"
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ec2.amazonaws.com"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "ComponentPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "ComponentPolicy",
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "cloudwatch:*"
+              ],
+              "Resource": [
+                "*"
+              ],
+              "Effect": "Allow"
+            }
+          ]
+        },
+        "Roles": [
+          {
+            "Ref": "ComponentRole"
+          }
+        ]
+      }
+    }
+  }
+}
