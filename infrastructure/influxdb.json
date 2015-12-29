@@ -26,6 +26,7 @@
     },
     "ConfigURL": {
       "Description": "The URL for the influxdb.conf file",
+      "Default": "https://raw.githubusercontent.com/acervos/influxdb-aws/master/influxdb.conf",
       "Type": "String"
     }
   },
@@ -295,6 +296,25 @@
           }
         ]
       }
+    }
+  },
+  "Outputs": {
+    "WebsiteURL": {
+      "Value": {
+       "Fn::Join": [
+         "",
+         [
+           "http://",
+           {
+             "Fn::GetAtt": [
+               "ComponentElasticLoadBalancer",
+               "DNSName"
+             ]
+           }
+         ]
+       ]
+     },
+      "Description": "URL for newly created influxdb application"
     }
   }
 }
